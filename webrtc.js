@@ -5,14 +5,18 @@
         alert('Расширение должно работать в несэндбоксовом режиме для доступа к микрофону!');
     }
 
-    class CloudLinkWebRTC {
+    class CloudLinkWebRTCPrimitive {
         constructor() {
             this.ws = null;
             this.peerConnection = null;
             this.localStream = null;
             this.remoteStream = null;
-            this.targetUser = null; // Кому звоним / от кого ждем звонок
             
+            // Последние сгенерированные данные для чтения через репортеры
+            this.lastLocalOffer = '';
+            this.lastLocalAnswer = '';
+            this.lastLocalCandidate = '';
+
             this.rtcConfig = {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -23,92 +27,193 @@
 
         getInfo() {
             return {
-                id: 'cloudlinkwebrtc',
-                name: 'CloudLink WebRTC Voice',
-                color1: '#4CAF50',
-                color2: '#388E3C',
+                id: 'cloudlinkwebrtcprimitive',
+                name: 'WebRTC & CloudLink Primitives',
+                color1: '#3F51B5',
+                color2: '#303F9F',
                 blocks: [
+                    // CloudLink связь
                     {
                         opcode: 'connectCloudlink',
                         blockType: Scratch.BlockType.COMMAND,
-                        text: 'подключиться к CloudLink серверу [URL]',
+                        text: 'подключиться к CloudLink [URL]',
                         arguments: {
                             URL: { type: Scratch.ArgumentType.STRING, defaultValue: 'wss://cloudlink.awix.gay/ws' }
                         }
                     },
                     {
-                        opcode: 'callUser',
-                        blockType: Scratch.BlockType.COMMAND,
-                        text: 'позвонить игроку [USER]',
+                        opcode: 'sendCloudlinkMessage',
+                        blockType:Scratch.BlockType.COMMAND,
+                        text: 'отправить игроку [ID] сообщение [DATA]',
                         arguments: {
-                            USER: { type: Scratch.ArgumentType.STRING, defaultValue: 'Player2' }
+                            ID: { type: Scratch.ArgumentType.STRING, defaultValue: 'Player2' },
+                            DATA: { type: Scratch.ArgumentType.STRING, defaultValue: 'hello' }
                         }
                     },
                     {
-                        opcode: 'muteMic',
+                        opcode: 'whenMessageReceived',
+                        blockType: Scratch.BlockType.EVENT,
+                        text: 'когда получено сообщение CloudLink'
+                    },
+                    {
+                        opcode: 'getLastMessage',
+                        blockType: Scratch.BlockType.REPORTER,
+                        text: 'последнее сообщение CloudLink'
+                    },
+                    {
+                        opcode: 'getLastSender',
+                        blockType: Scratch.BlockType.REPORTER,
+                        text: 'отправитель последнего сообщения'
+                    },
+
+                    '---',
+
+                    // WebRTC Primitives
+                    {
+                        opcode: 'initLocalAudio',
                         blockType: Scratch.BlockType.COMMAND,
-                        text: 'микрофон вкл [STATE]',
+                        text: 'включить локальный микрофон'
+                    },
+                    {
+                        opcode: 'createPeerConnection',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'создать RTCPeerConnection'
+                    },
+                    {
+                        opcode: 'createOffer',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'создать WebRTC Offer'
+                    },
+                    {
+                        opcode: 'createAnswer',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'создать WebRTC Answer для offer [OFFER]',
+                        arguments: {
+                            OFFER: { type: Scratch.ArgumentType.STRING, defaultValue: '' }
+                        }
+                    },
+                    {
+                        opcode: 'setRemoteDescription',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'установить remote description [TYPE] из [SDP]',
+                        arguments: {
+                            TYPE: { type: Scratch.ArgumentType.STRING, menu: 'sdpTypeMenu', defaultValue: 'offer' },
+                            SDP: { type: Scratch.ArgumentType.STRING, defaultValue: '' }
+                        }
+                    },
+                    {
+                        opcode: 'addIceCandidate',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'добавить ICE кандидата [CANDIDATE]',
+                        arguments: {
+                            CANDIDATE: { type: Scratch.ArgumentType.STRING, defaultValue: '' }
+                        }
+                    },
+
+                    '---',
+
+                    // Репортеры данных WebRTC
+                    {
+                        opcode: 'getLocalOffer',
+                        blockType: Scratch.BlockType.REPORTER,
+                        text: 'созданный Offer (текст)'
+                    },
+                    {
+                        opcode: 'getLocalAnswer',
+                        blockType: Scratch.BlockType.REPORTER,
+                        text: 'созданный Answer (текст)'
+                    },
+                    {
+                        opcode: 'getLocalCandidate',
+                        blockType: Scratch.BlockType.REPORTER,
+                        text: 'последний ICE кандидат (текст)'
+                    },
+
+                    // Управление звуком
+                    {
+                        opcode: 'setMuted',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'микрофон включен [STATE]',
                         arguments: {
                             STATE: { type: Scratch.ArgumentType.STRING, menu: 'boolMenu', defaultValue: 'да' }
                         }
                     }
                 ],
                 menus: {
-                    boolMenu: { items: ['да', 'нет'] }
+                    boolMenu: { items: ['да', 'нет'] },
+                    sdpTypeMenu: { items: ['offer', 'answer'] }
                 }
             };
         }
 
+        // --- CloudLink логика ---
         connectCloudlink(args) {
+            if (this.ws) {
+                this.ws.close();
+            }
             this.ws = new WebSocket(args.URL);
+            this.lastMessage = '';
+            this.lastSender = '';
 
-            this.ws.onopen = () => {
-                console.log('CloudLink подключен, используем как сигнальный сервер');
-                // Стандартная инициализация в CloudLink (установка ID, если требуется)
-                this.ws.send(JSON.stringify({ val: "ID", id: "WebRTCUser_" + Math.floor(Math.random()*1000) }));
-            };
-
-            this.ws.onmessage = async (event) => {
-                let packet;
+            this.ws.onmessage = (event) => {
                 try {
-                    packet = JSON.parse(event.data);
-                } catch (e) {
-                    return;
-                }
-
-                // Обработка кастомных сигнальных сообщений WebRTC через CloudLink
-                if (packet.cmd === "direct" && packet.val) {
-                    let signalData = packet.val;
-
-                    if (signalData.type === 'offer') {
-                        await this.handleOffer(signalData.offer, packet.id);
-                    } else if (signalData.type === 'answer') {
-                        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(signalData.answer));
-                    } else if (signalData.type === 'candidate') {
-                        if (this.peerConnection) {
-                            await this.peerConnection.addIceCandidate(new RTCIceCandidate(signalData.candidate));
-                        }
+                    const packet = JSON.parse(event.data);
+                    // Обработка стандартных приватных сообщений CloudLink
+                    if (packet.cmd === "pmsg") {
+                        this.lastMessage = typeof packet.val === 'object' ? JSON.stringify(packet.val) : packet.val;
+                        this.lastSender = packet.id || '';
+                        Scratch.vm.runtime.startHats('cloudlinkwebrtcprimitive_whenMessageReceived');
                     }
+                } catch (e) {
+                    // Если пришел не JSON, а просто текст
+                    this.lastMessage = event.data;
+                    this.lastSender = '';
+                    Scratch.vm.runtime.startHats('cloudlinkwebrtcprimitive_whenMessageReceived');
                 }
             };
         }
 
-        async initMedia() {
+        sendCloudlinkMessage(args) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                let valToSend = args.DATA;
+                try {
+                    valToSend = JSON.parse(args.DATA); // Если передали JSON-строку
+                } catch (e) {}
+
+                this.ws.send(JSON.stringify({
+                    cmd: "pmsg",
+                    val: valToSend,
+                    id: args.ID
+                }));
+            }
+        }
+
+        whenMessageReceived() { return true; }
+        getLastMessage() { return this.lastMessage; }
+        getLastSender() { return this.lastSender; }
+
+        // --- WebRTC Primitives ---
+        async initLocalAudio() {
             if (!this.localStream) {
                 this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             }
         }
 
-        createPeerConnection(remoteId) {
-            this.targetUser = remoteId;
+        createPeerConnection() {
+            if (this.peerConnection) {
+                this.peerConnection.close();
+            }
+
             this.peerConnection = new RTCPeerConnection(this.rtcConfig);
 
-            // Добавляем дорожки микрофона
-            this.localStream.getTracks().forEach(track => {
-                this.peerConnection.addTrack(track, this.localStream);
-            });
+            // Добавляем локальные треки микрофона, если они уже есть
+            if (this.localStream) {
+                this.localStream.getTracks().forEach(track => {
+                    this.peerConnection.addTrack(track, this.localStream);
+                });
+            }
 
-            // Получение аудио от собеседника
+            // Перехват удаленного звука (собеседника)
             this.peerConnection.ontrack = (event) => {
                 this.remoteStream = event.streams[0];
                 const audio = document.createElement('audio');
@@ -117,47 +222,67 @@
                 document.body.appendChild(audio);
             };
 
-            // Отправка ICE-кандидатов через CloudLink
+            // Перехват ICE кандидатов
             this.peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
-                    this.sendSignal(this.targetUser, { type: 'candidate', candidate: event.candidate });
+                    this.lastLocalCandidate = JSON.stringify(event.candidate);
                 }
             };
         }
 
-        async callUser(args) {
-            await this.initMedia();
-            this.createPeerConnection(args.USER);
-
+        async createOffer() {
+            if (!this.peerConnection) return;
             const offer = await this.peerConnection.createOffer();
             await this.peerConnection.setLocalDescription(offer);
-
-            this.sendSignal(this.targetUser, { type: 'offer', offer: offer });
+            this.lastLocalOffer = JSON.stringify(offer);
         }
 
-        async handleOffer(offer, senderId) {
-            await this.initMedia();
-            this.createPeerConnection(senderId);
+        async createAnswer(args) {
+            if (!this.peerConnection) return;
+            let offerObj;
+            try {
+                offerObj = JSON.parse(args.OFFER);
+            } catch (e) {
+                offerObj = args.OFFER;
+            }
 
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerObj));
             const answer = await this.peerConnection.createAnswer();
             await this.peerConnection.setLocalDescription(answer);
-
-            this.sendSignal(senderId, { type: 'answer', answer: answer });
+            this.lastLocalAnswer = JSON.stringify(answer);
         }
 
-        sendSignal(target, data) {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                // Отправка личного сообщения через CloudLink
-                this.ws.send(JSON.stringify({
-                    cmd: "pmsg",
-                    val: data,
-                    id: target
-                }));
+        async setRemoteDescription(args) {
+            if (!this.peerConnection) return;
+            let sdpObj;
+            try {
+                sdpObj = JSON.parse(args.SDP);
+            } catch (e) {
+                sdpObj = args.SDP;
             }
+
+            await this.peerConnection.setRemoteDescription(new RTCSessionDescription({
+                type: args.TYPE,
+                sdp: sdpObj.sdp || sdpObj
+            }));
         }
 
-        muteMic(args) {
+        async addIceCandidate(args) {
+            if (!this.peerConnection) return;
+            let candObj;
+            try {
+                candObj = JSON.parse(args.CANDIDATE);
+            } catch (e) {
+                return;
+            }
+            await this.peerConnection.addIceCandidate(new RTCIceCandidate(candObj));
+        }
+
+        getLocalOffer() { return this.lastLocalOffer; }
+        getLocalAnswer() { return this.lastLocalAnswer; }
+        getLocalCandidate() { return this.lastLocalCandidate; }
+
+        setMuted(args) {
             if (this.localStream) {
                 const enable = args.STATE === 'да';
                 this.localStream.getAudioTracks().forEach(track => {
@@ -167,5 +292,5 @@
         }
     }
 
-    Scratch.extensions.register(new CloudLinkWebRTC());
+    Scratch.extensions.register(new CloudLinkWebRTCPrimitive());
 })(Scratch);
