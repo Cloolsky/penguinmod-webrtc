@@ -1,296 +1,758 @@
 (function(Scratch) {
     'use strict';
 
-    if (!Scratch.extensions.unsandboxed) {
-        alert('Расширение должно работать в несэндбоксовом режиме для доступа к микрофону!');
-    }
-
-    class CloudLinkWebRTCPrimitive {
+    class PureWebRTCExtension {
         constructor() {
-            this.ws = null;
-            this.peerConnection = null;
+            this.peerConnections = {};
             this.localStream = null;
-            this.remoteStream = null;
-            
-            // Последние сгенерированные данные для чтения через репортеры
-            this.lastLocalOffer = '';
-            this.lastLocalAnswer = '';
-            this.lastLocalCandidate = '';
+            this.remoteStreams = {};
+            this.pendingIce = {};
+            this.iceQueue = [];
+            this.lastOffer = '';
+            this.lastAnswer = '';
+            this.containers = {};
+            this.audioElements = {};
+        }
 
-            this.rtcConfig = {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
-                ]
-            };
+        ensureLocalStream() {
+            if (!this.localStream) {
+                this.localStream = new MediaStream();
+            }
         }
 
         getInfo() {
             return {
-                id: 'cloudlinkwebrtcprimitive',
-                name: 'WebRTC & CloudLink Primitives',
-                color1: '#3F51B5',
-                color2: '#303F9F',
+                id: 'purewebrtcchat',
+                name: 'Pure WebRTC Call',
+                color1: '#2575fc',
+                color2: '#6a11cb',
+
                 blocks: [
-                    // CloudLink связь
                     {
-                        opcode: 'connectCloudlink',
+                        opcode: 'setAudioDevice',
                         blockType: Scratch.BlockType.COMMAND,
-                        text: 'подключиться к CloudLink [URL]',
+                        text: 'микрофон [STATE]',
                         arguments: {
-                            URL: { type: Scratch.ArgumentType.STRING, defaultValue: 'wss://cloudlink.awix.gay/ws' }
+                            STATE: {
+                                type: Scratch.ArgumentType.STRING,
+                                menu: 'boolMenu',
+                                defaultValue: 'включить'
+                            }
                         }
                     },
                     {
-                        opcode: 'sendCloudlinkMessage',
-                        blockType:Scratch.BlockType.COMMAND,
-                        text: 'отправить игроку [ID] сообщение [DATA]',
+                        opcode: 'setVideoDevice',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'камера [STATE]',
                         arguments: {
-                            ID: { type: Scratch.ArgumentType.STRING, defaultValue: 'Player2' },
-                            DATA: { type: Scratch.ArgumentType.STRING, defaultValue: 'hello' }
+                            STATE: {
+                                type: Scratch.ArgumentType.STRING,
+                                menu: 'boolMenu',
+                                defaultValue: 'включить'
+                            }
                         }
                     },
                     {
-                        opcode: 'whenMessageReceived',
-                        blockType: Scratch.BlockType.EVENT,
-                        text: 'когда получено сообщение CloudLink'
-                    },
-                    {
-                        opcode: 'getLastMessage',
-                        blockType: Scratch.BlockType.REPORTER,
-                        text: 'последнее сообщение CloudLink'
-                    },
-                    {
-                        opcode: 'getLastSender',
-                        blockType: Scratch.BlockType.REPORTER,
-                        text: 'отправитель последнего сообщения'
-                    },
-
-                    '---',
-
-                    // WebRTC Primitives
-                    {
-                        opcode: 'initLocalAudio',
+                        opcode: 'createConnection',
                         blockType: Scratch.BlockType.COMMAND,
-                        text: 'включить локальный микрофон'
+                        text: 'создать соединение для [ID]',
+                        arguments: {
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'player2'
+                            }
+                        }
                     },
                     {
-                        opcode: 'createPeerConnection',
+                        opcode: 'closeConnection',
                         blockType: Scratch.BlockType.COMMAND,
-                        text: 'создать RTCPeerConnection'
+                        text: 'закрыть соединение для [ID]',
+                        arguments: {
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'player2'
+                            }
+                        }
                     },
                     {
                         opcode: 'createOffer',
                         blockType: Scratch.BlockType.COMMAND,
-                        text: 'создать WebRTC Offer'
-                    },
-                    {
-                        opcode: 'createAnswer',
-                        blockType: Scratch.BlockType.COMMAND,
-                        text: 'создать WebRTC Answer для offer [OFFER]',
+                        text: 'создать offer для [ID]',
                         arguments: {
-                            OFFER: { type: Scratch.ArgumentType.STRING, defaultValue: '' }
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'player2'
+                            }
                         }
                     },
                     {
-                        opcode: 'setRemoteDescription',
-                        blockType: Scratch.BlockType.COMMAND,
-                        text: 'установить remote description [TYPE] из [SDP]',
-                        arguments: {
-                            TYPE: { type: Scratch.ArgumentType.STRING, menu: 'sdpTypeMenu', defaultValue: 'offer' },
-                            SDP: { type: Scratch.ArgumentType.STRING, defaultValue: '' }
-                        }
-                    },
-                    {
-                        opcode: 'addIceCandidate',
-                        blockType: Scratch.BlockType.COMMAND,
-                        text: 'добавить ICE кандидата [CANDIDATE]',
-                        arguments: {
-                            CANDIDATE: { type: Scratch.ArgumentType.STRING, defaultValue: '' }
-                        }
-                    },
-
-                    '---',
-
-                    // Репортеры данных WebRTC
-                    {
-                        opcode: 'getLocalOffer',
+                        opcode: 'getOfferText',
                         blockType: Scratch.BlockType.REPORTER,
                         text: 'созданный Offer (текст)'
                     },
                     {
-                        opcode: 'getLocalAnswer',
+                        opcode: 'setRemoteOffer',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'установить remote offer для [ID] из [TEXT]',
+                        arguments: {
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'player1'
+                            },
+                            TEXT: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'текст'
+                            }
+                        }
+                    },
+                    {
+                        opcode: 'createAnswer',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'создать answer для [ID] из offer [TEXT]',
+                        arguments: {
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'player1'
+                            },
+                            TEXT: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'текст'
+                            }
+                        }
+                    },
+                    {
+                        opcode: 'getAnswerText',
                         blockType: Scratch.BlockType.REPORTER,
                         text: 'созданный Answer (текст)'
                     },
                     {
-                        opcode: 'getLocalCandidate',
-                        blockType: Scratch.BlockType.REPORTER,
-                        text: 'последний ICE кандидат (текст)'
-                    },
-
-                    // Управление звуком
-                    {
-                        opcode: 'setMuted',
+                        opcode: 'setRemoteAnswer',
                         blockType: Scratch.BlockType.COMMAND,
-                        text: 'микрофон включен [STATE]',
+                        text: 'установить remote answer для [ID] из [TEXT]',
                         arguments: {
-                            STATE: { type: Scratch.ArgumentType.STRING, menu: 'boolMenu', defaultValue: 'да' }
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'player2'
+                            },
+                            TEXT: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'текст'
+                            }
+                        }
+                    },
+                    {
+                        opcode: 'getIceText',
+                        blockType: Scratch.BlockType.REPORTER,
+                        text: 'текущий ICE кандидат'
+                    },
+                    {
+                        opcode: 'hasNewIceCandidate',
+                        blockType: Scratch.BlockType.BOOLEAN,
+                        text: 'есть ли новый ICE кандидат?'
+                    },
+                    {
+                        opcode: 'addIceCandidate',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'добавить ICE кандидата для [ID] из [TEXT]',
+                        arguments: {
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'partner'
+                            },
+                            TEXT: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'кандидат'
+                            }
+                        }
+                    },
+                    {
+                        opcode: 'createVideoWindow',
+                        blockType: Scratch.BlockType.COMMAND,
+                        text: 'создать видео окно для [ID] (тип: [TYPE])',
+                        arguments: {
+                            ID: {
+                                type: Scratch.ArgumentType.STRING,
+                                defaultValue: 'player2'
+                            },
+                            TYPE: {
+                                type: Scratch.ArgumentType.STRING,
+                                menu: 'videoTypeMenu',
+                                defaultValue: 'собеседник'
+                            }
                         }
                     }
                 ],
+
                 menus: {
-                    boolMenu: { items: ['да', 'нет'] },
-                    sdpTypeMenu: { items: ['offer', 'answer'] }
-                }
-            };
-        }
-
-        // --- CloudLink логика ---
-        connectCloudlink(args) {
-            if (this.ws) {
-                this.ws.close();
-            }
-            this.ws = new WebSocket(args.URL);
-            this.lastMessage = '';
-            this.lastSender = '';
-
-            this.ws.onmessage = (event) => {
-                try {
-                    const packet = JSON.parse(event.data);
-                    // Обработка стандартных приватных сообщений CloudLink
-                    if (packet.cmd === "pmsg") {
-                        this.lastMessage = typeof packet.val === 'object' ? JSON.stringify(packet.val) : packet.val;
-                        this.lastSender = packet.id || '';
-                        Scratch.vm.runtime.startHats('cloudlinkwebrtcprimitive_whenMessageReceived');
+                    boolMenu: {
+                        acceptReporters: false,
+                        items: ['включить', 'выключить']
+                    },
+                    videoTypeMenu: {
+                        acceptReporters: false,
+                        items: ['собеседник', 'я сам']
                     }
-                } catch (e) {
-                    // Если пришел не JSON, а просто текст
-                    this.lastMessage = event.data;
-                    this.lastSender = '';
-                    Scratch.vm.runtime.startHats('cloudlinkwebrtcprimitive_whenMessageReceived');
                 }
             };
         }
 
-        sendCloudlinkMessage(args) {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                let valToSend = args.DATA;
+        async setAudioDevice(args) {
+            this.ensureLocalStream();
+
+            const turnOn = String(args.STATE) === 'включить';
+
+            try {
+                const oldTracks = this.localStream.getAudioTracks();
+
+                for (const track of oldTracks) {
+                    track.stop();
+                    this.localStream.removeTrack(track);
+                }
+
+                if (!turnOn) {
+                    await this.updateAllPeerTracks('audio', null);
+                    return;
+                }
+
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('getUserMedia недоступен');
+                }
+
+                const tempStream = await navigator.mediaDevices.getUserMedia({
+                    audio: true
+                });
+
+                const track = tempStream.getAudioTracks()[0];
+
+                if (!track) {
+                    throw new Error('Микрофон не вернул аудиотрек');
+                }
+
+                this.localStream.addTrack(track);
+                await this.updateAllPeerTracks('audio', track);
+            } catch (err) {
+                console.error('Ошибка микрофона:', err);
+            }
+        }
+
+        async setVideoDevice(args) {
+            this.ensureLocalStream();
+
+            const turnOn = String(args.STATE) === 'включить';
+
+            try {
+                const oldTracks = this.localStream.getVideoTracks();
+
+                for (const track of oldTracks) {
+                    track.stop();
+                    this.localStream.removeTrack(track);
+                }
+
+                if (!turnOn) {
+                    await this.updateAllPeerTracks('video', null);
+                    this.refreshLocalWindows();
+                    return;
+                }
+
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('getUserMedia недоступен');
+                }
+
+                const tempStream = await navigator.mediaDevices.getUserMedia({
+                    video: true
+                });
+
+                const track = tempStream.getVideoTracks()[0];
+
+                if (!track) {
+                    throw new Error('Камера не вернула видеотрек');
+                }
+
+                this.localStream.addTrack(track);
+                await this.updateAllPeerTracks('video', track);
+                this.refreshLocalWindows();
+            } catch (err) {
+                console.error('Ошибка камеры:', err);
+            }
+        }
+
+        async updateAllPeerTracks(kind, newTrack) {
+            for (const id in this.peerConnections) {
+                const pc = this.peerConnections[id];
+
                 try {
-                    valToSend = JSON.parse(args.DATA); // Если передали JSON-строку
+                    const transceiver = pc.getTransceivers().find(
+                        t =>
+                            t.receiver &&
+                            t.receiver.track &&
+                            t.receiver.track.kind === kind
+                    );
+
+                    if (transceiver && transceiver.sender) {
+                        await transceiver.sender.replaceTrack(newTrack || null);
+                    }
+                } catch (err) {
+                    console.error(
+                        `Ошибка замены ${kind}-трека для ${id}:`,
+                        err
+                    );
+                }
+            }
+        }
+
+        refreshLocalWindows() {
+            this.ensureLocalStream();
+
+            for (const id in this.containers) {
+                const video = this.containers[id].querySelector('video');
+
+                if (video && video.dataset.type === 'я сам') {
+                    video.srcObject = this.localStream;
+
+                    const result = video.play();
+                    if (result && typeof result.catch === 'function') {
+                        result.catch(() => {});
+                    }
+                }
+            }
+        }
+
+        createConnection(args) {
+            this.ensureLocalStream();
+
+            const id = String(args.ID || '').trim();
+
+            if (!id) {
+                return;
+            }
+
+            if (!window.RTCPeerConnection) {
+                console.error('RTCPeerConnection недоступен');
+                return;
+            }
+
+            if (this.peerConnections[id]) {
+                this.closeConnection({ ID: id });
+            }
+
+            this.pendingIce[id] = [];
+
+            const pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            });
+
+            this.peerConnections[id] = pc;
+
+            pc.addTransceiver('audio', {
+                direction: 'sendrecv'
+            });
+
+            pc.addTransceiver('video', {
+                direction: 'sendrecv'
+            });
+
+            const audioTrack = this.localStream.getAudioTracks()[0];
+            const videoTrack = this.localStream.getVideoTracks()[0];
+
+            const audioTransceiver = pc.getTransceivers().find(
+                t =>
+                    t.receiver &&
+                    t.receiver.track &&
+                    t.receiver.track.kind === 'audio'
+            );
+
+            const videoTransceiver = pc.getTransceivers().find(
+                t =>
+                    t.receiver &&
+                    t.receiver.track &&
+                    t.receiver.track.kind === 'video'
+            );
+
+            if (audioTransceiver && audioTrack) {
+                audioTransceiver.sender.replaceTrack(audioTrack);
+            }
+
+            if (videoTransceiver && videoTrack) {
+                videoTransceiver.sender.replaceTrack(videoTrack);
+            }
+
+            pc.onicecandidate = event => {
+                if (event.candidate) {
+                    this.iceQueue.push(
+                        JSON.stringify(event.candidate)
+                    );
+                }
+            };
+
+            pc.ontrack = event => {
+                let stream = event.streams && event.streams[0];
+
+                if (!stream) {
+                    if (!this.remoteStreams[id]) {
+                        this.remoteStreams[id] = new MediaStream();
+                    }
+
+                    stream = this.remoteStreams[id];
+
+                    if (
+                        !stream.getTracks().some(
+                            track => track.id === event.track.id
+                        )
+                    ) {
+                        stream.addTrack(event.track);
+                    }
+                }
+
+                this.remoteStreams[id] = stream;
+                this.updateVideoElement(id);
+                this.playRemoteAudio(id, stream);
+            };
+
+            pc.ondatachannel = event => {
+                if (event.channel) {
+                    event.channel.onopen = () => {};
+                    event.channel.onclose = () => {};
+                    event.channel.onerror = () => {};
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                console.log(
+                    `WebRTC ${id}:`,
+                    pc.connectionState
+                );
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                console.log(
+                    `ICE ${id}:`,
+                    pc.iceConnectionState
+                );
+            };
+
+            pc.onicegatheringstatechange = () => {
+                console.log(
+                    `ICE gathering ${id}:`,
+                    pc.iceGatheringState
+                );
+            };
+        }
+
+        async waitForIceGatheringComplete(pc, timeout = 7000) {
+            if (pc.iceGatheringState === 'complete') {
+                return;
+            }
+
+            await new Promise(resolve => {
+                let finished = false;
+
+                const finish = () => {
+                    if (finished) {
+                        return;
+                    }
+
+                    finished = true;
+                    clearTimeout(timer);
+                    pc.removeEventListener(
+                        'icegatheringstatechange',
+                        check
+                    );
+                    resolve();
+                };
+
+                const check = () => {
+                    if (pc.iceGatheringState === 'complete') {
+                        finish();
+                    }
+                };
+
+                const timer = setTimeout(finish, timeout);
+
+                pc.addEventListener(
+                    'icegatheringstatechange',
+                    check
+                );
+
+                check();
+            });
+        }
+        closeConnection(args) {
+            const id = String(args.ID || '').trim();
+
+            const pc = this.peerConnections[id];
+
+            if (pc) {
+                try {
+                    pc.onicecandidate = null;
+                    pc.ontrack = null;
+                    pc.ondatachannel = null;
+                    pc.close();
                 } catch (e) {}
 
-                this.ws.send(JSON.stringify({
-                    cmd: "pmsg",
-                    val: valToSend,
-                    id: args.ID
-                }));
+                delete this.peerConnections[id];
+            }
+
+            delete this.remoteStreams[id];
+            delete this.pendingIce[id];
+
+            if (this.containers[id]) {
+                this.containers[id].remove();
+                delete this.containers[id];
+            }
+
+            if (this.audioElements[id]) {
+                this.audioElements[id].remove();
+                delete this.audioElements[id];
             }
         }
 
-        whenMessageReceived() { return true; }
-        getLastMessage() { return this.lastMessage; }
-        getLastSender() { return this.lastSender; }
-
-        // --- WebRTC Primitives ---
-        async initLocalAudio() {
-            if (!this.localStream) {
-                this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-            }
-        }
-
-        createPeerConnection() {
-            if (this.peerConnection) {
-                this.peerConnection.close();
-            }
-
-            this.peerConnection = new RTCPeerConnection(this.rtcConfig);
-
-            // Добавляем локальные треки микрофона, если они уже есть
-            if (this.localStream) {
-                this.localStream.getTracks().forEach(track => {
-                    this.peerConnection.addTrack(track, this.localStream);
-                });
-            }
-
-            // Перехват удаленного звука (собеседника)
-            this.peerConnection.ontrack = (event) => {
-                this.remoteStream = event.streams[0];
+        playRemoteAudio(id, stream) {
+            if (!this.audioElements[id]) {
                 const audio = document.createElement('audio');
-                audio.srcObject = this.remoteStream;
                 audio.autoplay = true;
+                audio.controls = false;
                 document.body.appendChild(audio);
-            };
+                this.audioElements[id] = audio;
+            }
 
-            // Перехват ICE кандидатов
-            this.peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    this.lastLocalCandidate = JSON.stringify(event.candidate);
-                }
-            };
+            const audio = this.audioElements[id];
+            audio.srcObject = stream;
+
+            const p = audio.play();
+            if (p && typeof p.catch === 'function') {
+                p.catch(() => {});
+            }
         }
 
-        async createOffer() {
-            if (!this.peerConnection) return;
-            const offer = await this.peerConnection.createOffer();
-            await this.peerConnection.setLocalDescription(offer);
-            this.lastLocalOffer = JSON.stringify(offer);
+        async createOffer(args) {
+            const pc = this.peerConnections[args.ID];
+            if (!pc) return;
+
+            try {
+                if (!pc.__pmDataChannel) {
+                    pc.__pmDataChannel = pc.createDataChannel('pm');
+                }
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                await this.waitForIceGatheringComplete(pc);
+
+                this.lastOffer = JSON.stringify(pc.localDescription);
+            } catch (err) {
+                console.error('Ошибка создания Offer:', err);
+            }
+        }
+
+        getOfferText() {
+            return this.lastOffer;
+        }
+
+        async flushIceQueue(id) {
+            const pc = this.peerConnections[id];
+
+            if (!pc || !pc.remoteDescription) {
+                return;
+            }
+
+            while (this.pendingIce[id].length) {
+                const candidate = this.pendingIce[id].shift();
+
+                try {
+                    await pc.addIceCandidate(candidate);
+                } catch (err) {
+                    console.error('Ошибка ICE:', err);
+                }
+            }
+        }
+
+        async setRemoteOffer(args) {
+            const pc = this.peerConnections[args.ID];
+            if (!pc) return;
+
+            try {
+                const text = String(args.TEXT).trim();
+
+                if (!text.startsWith('{')) {
+                    return;
+                }
+
+                await pc.setRemoteDescription(
+                    new RTCSessionDescription(JSON.parse(text))
+                );
+
+                await this.flushIceQueue(args.ID);
+            } catch (err) {
+                console.error('Ошибка установки Offer:', err);
+            }
         }
 
         async createAnswer(args) {
-            if (!this.peerConnection) return;
-            let offerObj;
-            try {
-                offerObj = JSON.parse(args.OFFER);
-            } catch (e) {
-                offerObj = args.OFFER;
-            }
+            const pc = this.peerConnections[args.ID];
+            if (!pc) return;
 
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerObj));
-            const answer = await this.peerConnection.createAnswer();
-            await this.peerConnection.setLocalDescription(answer);
-            this.lastLocalAnswer = JSON.stringify(answer);
+            try {
+                if (!pc.remoteDescription) {
+                    const text = String(args.TEXT).trim();
+
+                    if (text.startsWith('{')) {
+                        await pc.setRemoteDescription(
+                            new RTCSessionDescription(JSON.parse(text))
+                        );
+                    }
+                }
+
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                await this.waitForIceGatheringComplete(pc);
+
+                this.lastAnswer = JSON.stringify(pc.localDescription);
+
+                await this.flushIceQueue(args.ID);
+            } catch (err) {
+                console.error('Ошибка создания Answer:', err);
+            }
         }
 
-        async setRemoteDescription(args) {
-            if (!this.peerConnection) return;
-            let sdpObj;
+        getAnswerText() {
+            return this.lastAnswer;
+        }
+
+        async setRemoteAnswer(args) {
+            const pc = this.peerConnections[args.ID];
+            if (!pc) return;
+
             try {
-                sdpObj = JSON.parse(args.SDP);
-            } catch (e) {
-                sdpObj = args.SDP;
+                const text = String(args.TEXT).trim();
+
+                if (!text.startsWith('{')) {
+                    return;
+                }
+
+                await pc.setRemoteDescription(
+                    new RTCSessionDescription(JSON.parse(text))
+                );
+
+                await this.flushIceQueue(args.ID);
+            } catch (err) {
+                console.error('Ошибка установки Answer:', err);
+            }
+        }
+
+        getIceText() {
+            if (this.iceQueue.length === 0) {
+                return '';
             }
 
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription({
-                type: args.TYPE,
-                sdp: sdpObj.sdp || sdpObj
-            }));
+            return this.iceQueue.shift();
+        }
+
+        hasNewIceCandidate() {
+            return this.iceQueue.length > 0;
         }
 
         async addIceCandidate(args) {
-            if (!this.peerConnection) return;
-            let candObj;
+            const pc = this.peerConnections[args.ID];
+            if (!pc) return;
+
             try {
-                candObj = JSON.parse(args.CANDIDATE);
-            } catch (e) {
-                return;
+                const text = String(args.TEXT).trim();
+
+                if (!text.startsWith('{')) {
+                    return;
+                }
+
+                const candidate = new RTCIceCandidate(JSON.parse(text));
+
+                if (pc.remoteDescription) {
+                    await pc.addIceCandidate(candidate);
+                } else {
+                    this.pendingIce[args.ID].push(candidate);
+                }
+            } catch (err) {
+                console.error('Ошибка добавления ICE:', err);
             }
-            await this.peerConnection.addIceCandidate(new RTCIceCandidate(candObj));
         }
 
-        getLocalOffer() { return this.lastLocalOffer; }
-        getLocalAnswer() { return this.lastLocalAnswer; }
-        getLocalCandidate() { return this.lastLocalCandidate; }
+        createVideoWindow(args) {
+            this.ensureLocalStream();
 
-        setMuted(args) {
-            if (this.localStream) {
-                const enable = args.STATE === 'да';
-                this.localStream.getAudioTracks().forEach(track => {
-                    track.enabled = enable;
-                });
+            const id = args.ID;
+            const type = args.TYPE;
+
+            if (this.containers[id]) {
+                this.containers[id].remove();
+            }
+
+            const wrapper = document.createElement('div');
+
+            Object.assign(wrapper.style, {
+                position: 'absolute',
+                top: '50px',
+                left: '50px',
+                width: '170px',
+                height: '130px',
+                background: '#000',
+                border: '2px solid white',
+                borderRadius: '8px',
+                overflow: 'hidden',
+                resize: 'both',
+                zIndex: '999999'
+            });
+
+            const video = document.createElement('video');
+
+            video.dataset.type = type;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.style.width = '100%';
+            video.style.height = '100%';
+            video.style.objectFit = 'cover';
+
+            if (type === 'я сам') {
+                video.muted = true;
+                video.srcObject = this.localStream;
+            } else if (this.remoteStreams[id]) {
+                video.srcObject = this.remoteStreams[id];
+            }
+
+            wrapper.appendChild(video);
+            document.body.appendChild(wrapper);
+
+            this.containers[id] = wrapper;
+
+            const p = video.play();
+            if (p && typeof p.catch === 'function') {
+                p.catch(() => {});
+            }
+        }
+
+        updateVideoElement(id) {
+            if (!this.containers[id]) {
+                return;
+            }
+
+            const video = this.containers[id].querySelector('video');
+
+            if (
+                video &&
+                video.dataset.type === 'собеседник' &&
+                this.remoteStreams[id]
+            ) {
+                video.srcObject = this.remoteStreams[id];
+
+                const p = video.play();
+                if (p && typeof p.catch === 'function') {
+                    p.catch(() => {});
+                }
             }
         }
     }
 
-    Scratch.extensions.register(new CloudLinkWebRTCPrimitive());
+    Scratch.extensions.register(new PureWebRTCExtension());
+
 })(Scratch);
